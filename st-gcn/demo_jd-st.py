@@ -8,47 +8,13 @@ import yaml
 import pickle
 from collections import OrderedDict
 from numpy.lib.format import open_memmap
+from tools.ntu_read_skeleton import read_xyz
 # torch
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.autograd import Variable
 
-"""
-key: work_dir , value: ./work_dir/temp  . 
-key: config , value: config/st_gcn/kinetics-skeleton/test.yaml  . 
-key: phase , value: test  . 
-key: save_score , value: False  . 
-key: seed , value: 1  . 
-key: log_interval , value: 100  . 
-key: save_interval , value: 10  . 
-key: eval_interval , value: 5  . 
-key: print_log , value: True  . 
-key: show_topk , value: [1, 5]  . 
-key: feeder , value: st_gcn.feeder.Feeder_kinetics  . 
-key: num_worker , value: 128  . 
-key: train_feeder_args , value: {}  . 
-key: test_feeder_args , value: {'mode': 'test', 'data_path': './data/kinetics-skeleton/kinetics_val', 'label_path': './data/kinetics-skeleton/kinetics_val_label.json', 'window_size': 150}  . 
-key: model , value: st_gcn.net.ST_GCN  . 
-key: model_args , value: {'num_class': 400, 'channel': 3, 'window_size': 150, 'num_person': 2, 'num_point': 18, 'dropout': 0, 'graph': 'st_gcn.graph.Kinetics', 'graph_args': {'labeling_mode': 'spatial'}, 'mask_learning': True, 'use_data_bn': True}  . 
-key: weights , value: ./model/kinetics-st_gcn.pt  . 
-key: ignore_weights , value: []  . 
-key: base_lr , value: 0.01  . 
-key: step , value: [20, 40, 60]  . 
-key: device , value: 0  . 
-key: optimizer , value: SGD  . 
-key: nesterov , value: False  . 
-key: batch_size , value: 256  . 
-key: test_batch_size , value: 64  . 
-key: start_epoch , value: 0  . 
-key: num_epoch , value: 80  . 
-key: weight_decay , value: 0.0005  .
-
-
-"""
-
-base_lr = 0.01
-weight_decay = 0.0005
 model_args = {'num_class': 60, 
                 'channel': 3, 
                 'window_size': 300, 
@@ -58,11 +24,11 @@ model_args = {'num_class': 60,
                 'graph': 'st_gcn.graph.NTU_RGB_D', 
                 'graph_args': {'labeling_mode': 'spatial'}, 
                 'mask_learning': True, 
-                'use_data_bn': True
-                }
+                'use_data_bn': False
+}
 
 weight_file = './model/ntuxview-st_gcn.pt'
-
+feeder = 'st_gcn.feeder.Feeder'
 def load_model():
     output_device = 0
     Model = import_class('st_gcn.net.ST_GCN')
@@ -81,34 +47,9 @@ def load_model():
     return model
 
 
-def load_optimizer(optimizer_type):
-    if optimizer_type == 'SGD':
-        optimizer = optim.SGD(
-            model_args,
-            lr=base_lr,
-            momentum=0.9,
-            nesterov=False,
-            weight_decay=weight_decay)
-    elif optimizer_type == 'Adam':
-        optimizer = optim.Adam(
-            model_args,
-            lr=base_lr,
-            weight_decay=weight_decay)
-    else:
-        raise ValueError()
-
-    return optimizer
-
-
-
 """
 ##############Load Data#####################
 """
-feeder = 'st_gcn.feeder.Feeder'
-test_feeder_args = { 
-                    'data_path': './data/actions-10/xview/train_data.npy', 
-                    'label_path': './data/actions-10/xview/train_label.pkl', 
-                    'window_size': 300}
 test_batch_size = 1
 num_worker = 1
 
@@ -131,11 +72,10 @@ def import_class(name):
     return mod
 
 
-def eval(model, data_loader, output_device=0):
-    model.eval()
+def eval(model, data_loader, output_device=0, dstype='train'):
 
-    part = 'train'
-    out_path = './data/actions-10/features'
+    part = 'train' if dstype == "train" else 'test'
+    out_path = './data/{}/features'.format(dataset)
 
     fp = open_memmap(
         '{}/{}_data.npy'.format(out_path, part),
@@ -143,7 +83,7 @@ def eval(model, data_loader, output_device=0):
         mode='w+',
         shape=(len(data_loader['test']), 1, 256, 1))
     label_fp = open('{}/{}_label.txt'.format(out_path, part),'+w')
-    for i, (data, label) in enumerate(data_loader['test']):
+    for i, (data, label, sample_name) in enumerate(data_loader['test']):
 
         data = Variable(
             data.float().cuda(output_device),
@@ -154,25 +94,75 @@ def eval(model, data_loader, output_device=0):
                     requires_grad=False,
                     volatile=True)
         label_int = int(label.data.cpu().numpy())
-        print("label is {}".format(label_int))
+
+        label_fp.write(sample_name[0] + ", " + str(label_int)+'\n')
+        ddata = data.data.cpu().numpy()
+        label_fp.write(" ".join(list(map(lambda x: str(x), ddata.flatten()[:10]))) + '\n')
         output = model(data)
-        label_fp.write(str(label_int)+'\n')
         np_output = output.data.cpu().numpy()
-        print(np_output.shape)
+        label_fp.write(" ".join(list(map(lambda x: str(x), np_output.flatten()[:10]))) + '\n')
+
         fp[i,:,:,:] = np_output
-        # print(np_output[0][:,0])
 
-        # _label_str = str(label.data.cpu().numpy())
-        # _pred_label_str = str(torch.max(output, 1)[1].data.cpu().numpy())
-        # _pred_score = str(torch.max(output, 1)[0].data.cpu().numpy())
-
-        # print("--True Label -- Pred Label -- Pred Score--")
-        # print(_label_str + " -- " + _pred_label_str + " -- " + _pred_score)
     label_fp.close()
+
+
+def eval_single(model, sk_file, output_device=0):
+    data = read_xyz(sk_file, max_body=2, num_joint=25)
+    data = data.reshape((1,) + data.shape)
+    print(data.shape)
+
+    # data = Variable(
+    #     torch.Tensor(data).float().cuda(output_device),
+    #     requires_grad=False,
+    #     volatile=True)
+        
+    # ddata = data.data.cpu().numpy()
+    print(">> data : >>>")
+    print(data.flatten()[-10:])
+    print(data.shape[2])
+    myddata = np.zeros(shape=(1, 3, 300, 25, 2))
+    myddata[:,:,0:data.shape[2],:,:] = data
+    print(myddata.shape)
+    mydata = Variable(
+        torch.Tensor(myddata).float().cuda(output_device),
+        requires_grad=False,
+        volatile=True)
+    output = model(mydata)
+    np_output = output.data.cpu().numpy()
+    print(">> result : >>")
+    print(np_output.flatten()[:10])
+       
 
 
 
 if __name__ == '__main__':
+    run_batch = False
     _model = load_model()
-    _dloader = load_data()
-    eval(_model, _dloader, 0)    
+    _model.eval()
+
+    if run_batch:
+        datasets = ["actions-10", "actions-20"]
+        dstypes = ['train', 'val']
+        # dstype = "train"
+        for dataset in datasets:
+            for dstype in dstypes:
+                test_feeder_args = { 
+                    'data_path': './data/{}/xview/{}_data.npy'.format(dataset, dstype), 
+                    'label_path': './data/{}/xview/{}_label.pkl'.format(dataset, dstype), 
+                    'window_size': 300}
+                _dloader = load_data()
+                eval(_model, _dloader, 0, dstype)    
+    else:
+        datasets = ['actions-10', 'actions-20']
+        dstype = 'val' 
+        sk_names = ['S011C002P019R001A006.skeleton']
+        for sk_name in sk_names:
+            print("----------------------------")
+            print(sk_name)
+            for dataset in datasets:
+                print("================")
+                print(dataset)
+                sk_file = os.path.join('/home/joey/ai/dl/data-set/actions/{}'.format(dataset), sk_name)
+                eval_single(_model, sk_file)
+
